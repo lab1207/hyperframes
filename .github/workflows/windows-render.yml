@@ -1,6 +1,8 @@
 name: Windows render verification
 permissions:
   contents: read
+env:
+  HYPERFRAMES_NO_TELEMETRY: "1"
 on:
   workflow_dispatch:
     inputs:
@@ -9,30 +11,94 @@ on:
         required: false
         default: ""
 jobs:
-  probe:
-    name: "probe ${{ matrix.case }}"
+  census:
+    name: "engine-cli census ${{ matrix.copy }}"
     runs-on: windows-latest
-    timeout-minutes: 6
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { case: A-orphan-hang, run: "node .github/probe/orphan.cjs hang", limit: 1 }
-          - { case: B-plain-hang, run: "node .github/probe/orphan.cjs none", limit: 1 }
-          - { case: C-orphan-exit, run: "node .github/probe/orphan.cjs exit", limit: 3 }
-          - { case: D-wrapped-orphan-hang, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.cjs hang'", limit: 3 }
-          - { case: E-wrapped-orphan-exit, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.cjs exit'", limit: 3 }
-          - { case: F-wrapped-ok, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.cjs ok; exit 3'", limit: 3 }
+        copy: [1, 2, 3, 4]
+        lane: [engine-cli]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Probe step
+      - name: Disable Windows Defender real-time monitoring
         shell: pwsh
-        timeout-minutes: ${{ matrix.limit }}
+        continue-on-error: true
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # Only the engine-cli lane reads an LFS file (engine's ffprobe test parses a producer HDR PNG).
+          lfs: ${{ matrix.lane == 'engine-cli' }}
+
+      # -----------------------------------------------------------------
+      # Install FFmpeg so vitest suites that gate on `HAS_FFMPEG`
+      # (e.g. packages/engine videoFrameExtractor.test.ts) actually run on
+      # Windows. Without it those suites `describe.skipIf(!HAS_FFMPEG)`
+      # themselves silently and any Windows-specific regression in the
+      # FFmpeg-driven code paths would not be caught here.
+      # -----------------------------------------------------------------
+      - name: Install FFmpeg
+        uses: ./.github/actions/install-ffmpeg-windows
+
+      - name: Set FFMPEG_BIN for bun install
+        shell: pwsh
         run: |
-          Write-Host "start $(Get-Date -Format o)"
-          ${{ matrix.run }}
-          Write-Host "exit $LASTEXITCODE"
-      - name: After
-        if: always()
+          $path = (Get-Command ffmpeg.exe).Source
+          "FFMPEG_BIN=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
         shell: pwsh
-        run: Write-Host "after $(Get-Date -Format o)"
+        # Force the pre-1.3 "hoisted" linker on Windows. Bun 1.3.x's default
+        # "isolated" linker creates nested workspace junctions that don't
+        # materialize reliably on Windows GHA runners — manifests as
+        # `Cannot find package 'esbuild'` walking up from
+        # `packages/producer/build.mjs` and `EPERM stat` on
+        # `packages/producer/node_modules/@fontsource/*` from generators.
+        # See oven-sh/bun#23615, #18354, #10146. Linux CI keeps isolated;
+        # the lockfile is linker-agnostic so this flag is safe with
+        # --frozen-lockfile.
+        run: bun install --frozen-lockfile --linker=hoisted
+
+      # Vitest loads these workspace packages through their Node dist exports.
+      # No tested package needs the full publish build used by `bun run build`.
+      - name: Build test prerequisites
+        shell: pwsh
+        run: |
+          bun run --filter '@hyperframes/{parsers,lint,studio-server}' build
+          bun run --cwd packages/core build
+
+      - name: Prepare browser for process tests
+        if: matrix.lane == 'engine-cli'
+        shell: pwsh
+        run: node --import tsx packages/cli/scripts/prepare-process-test-browser.mjs
+      - name: Package tests x3 with a process census after each
+        shell: pwsh
+        timeout-minutes: 44
+        run: |
+          $stepStart = Get-Date
+          function Census($label) {
+            $mine = @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -gt $stepStart -and $_.ProcessId -ne $PID })
+            Write-Host "=== census $label $(Get-Date -Format o): $($mine.Count) processes started this step still alive; handles total $((Get-Process | Measure-Object HandleCount -Sum).Sum)"
+            $mine | Group-Object Name | Sort-Object Count -Descending | Format-Table Count, Name -AutoSize | Out-String -Width 200 | Write-Host
+            $mine | Where-Object { $_.Name -match 'node|chrom|bun|ffm|ffp|powershell|pwsh|conhost' } |
+              Select-Object ProcessId, ParentProcessId, Name, CreationDate, @{ n = 'Cmd'; e = { "$($_.CommandLine)".Substring(0, [Math]::Min(220, "$($_.CommandLine)".Length)) } } |
+              Format-Table -AutoSize | Out-String -Width 400 | Write-Host
+          }
+          Census "before"
+          foreach ($i in 1..3) {
+            $t = Get-Date
+            bun run --filter @hyperframes/engine --filter @hyperframes/cli test -- --maxWorkers=2 2>&1 | Select-String -Pattern 'Test Files|Tests  |FAIL|failed|Error:' | ForEach-Object { Write-Host $_ }
+            Write-Host "iteration $i exit $LASTEXITCODE in $([int]((Get-Date) - $t).TotalSeconds) s"
+            Census "after-$i"
+          }
