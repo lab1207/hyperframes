@@ -17,12 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { case: A-orphan-hang, run: "node .github/probe/orphan.js hang", limit: 1 }
-          - { case: B-plain-hang, run: "node .github/probe/orphan.js none", limit: 1 }
-          - { case: C-orphan-exit, run: "node .github/probe/orphan.js exit", limit: 3 }
-          - { case: D-wrapped-orphan-hang, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.js hang'", limit: 3 }
-          - { case: E-wrapped-orphan-exit, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.js exit'", limit: 3 }
-          - { case: F-wrapped-ok, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.js ok; exit 3'", limit: 3 }
+          - { case: A-orphan-hang, run: "node .github/probe/orphan.cjs hang", limit: 1 }
+          - { case: B-plain-hang, run: "node .github/probe/orphan.cjs none", limit: 1 }
+          - { case: C-orphan-exit, run: "node .github/probe/orphan.cjs exit", limit: 3 }
+          - { case: D-wrapped-orphan-hang, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.cjs hang'", limit: 3 }
+          - { case: E-wrapped-orphan-exit, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.cjs exit'", limit: 3 }
+          - { case: F-wrapped-ok, run: "pwsh .github/scripts/windows-step-deadline.ps1 -Minutes 1 -Command 'node .github/probe/orphan.cjs ok; exit 3'", limit: 3 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Probe step
